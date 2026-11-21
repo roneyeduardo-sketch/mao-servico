@@ -49,53 +49,106 @@ def leitura(nome, achadas, lang):
     return json.loads(j['choices'][0]['message']['content'])
 
 
-@app.post('/mao')
-def tracar():
+def auth():
     tok = os.environ.get('MAO_TOKEN', '')
     got = (request.headers.get('Authorization') or '').removeprefix('Bearer ').strip()
     if not tok or not hmac.compare_digest(got, tok): abort(401)
+
+
+def achar_foto(d, raw):
     import re
-    raw = request.get_data(as_text=True)
-    log.info('RAW %s', raw[:600])
-    d = request.get_json(silent=True) or {}
-    foto = ''
     for k in ('foto', 'foto2', 'foto3'):
         v = str(d.get(k) or '').strip()
-        if v.startswith('http'): foto = v; break
-    if not foto:
-        m = re.search(r'https?://[^\s"\',}]+', raw)
-        if m: foto = m.group(0)
-    log.info('FOTO %s', foto[:200])
-    if not foto.startswith('http'): return jsonify(erro='foto_invalida'), 400
+        if v.startswith('http'): return v
+    m = re.search(r'https?://[^\s"\',}]+', raw)
+    return m.group(0) if m else ''
+
+
+def processar(d, foto, base):
+    """Retorna (dict, status http)."""
     faxina()
     try:
         p = baixar(foto)
     except Exception as e:
         log.info('ERRO download %s', e)
-        return jsonify(erro='download', detalhe=str(e)[:120]), 422
+        return {'erro': 'download', 'detalhe': str(e)[:120]}, 422
     try:
         pil, P, ln = mao.analyze(p)
         log.info('LINHAS %s', sorted(ln.keys()))
-        if len(ln) < 2: return jsonify(erro='poucas_linhas'), 422
+        if len(ln) < 2: return {'erro': 'poucas_linhas'}, 422
         nome = uuid.uuid4().hex + '.jpg'
         mao.render(pil, P, ln, f'{OUT}/{nome}')
     except ValueError as e:
         log.info('ERRO valor %s', e)
-        return jsonify(erro=str(e)), 422
+        return {'erro': str(e)}, 422
     except Exception as e:
         log.exception('ERRO processamento')
-        return jsonify(erro='processamento', detalhe=str(e)[:120]), 500
+        return {'erro': 'processamento', 'detalhe': str(e)[:120]}, 500
     finally:
         try: os.remove(p)
         except OSError: pass
-    base = os.environ.get('PUBLIC_URL', request.host_url).rstrip('/')
     out = {'imagem': f'{base}/img/{nome}', 'linhas': sorted(ln.keys())}
     try:
         r = leitura(d.get('nome'), sorted(ln.keys()), d.get('lang', 'pt-BR'))
         out['leitura'] = r.get('leitura', ''); out['resumo'] = r.get('resumo', '')
     except Exception as e:
         out['leitura'] = ''; out['resumo'] = ''; out['erro_leitura'] = str(e)[:100]
-    return jsonify(out)
+    return out, 200
+
+
+def base_url():
+    return os.environ.get('PUBLIC_URL', request.host_url).rstrip('/')
+
+
+@app.post('/mao')
+def tracar():
+    auth()
+    raw = request.get_data(as_text=True)
+    log.info('RAW %s', raw[:600])
+    d = request.get_json(silent=True) or {}
+    foto = achar_foto(d, raw)
+    log.info('FOTO %s', foto[:200])
+    if not foto.startswith('http'): return jsonify(erro='foto_invalida'), 400
+    out, st = processar(d, foto, base_url())
+    return jsonify(out), st
+
+
+JOBS = {}
+
+
+@app.post('/mao/start')
+def start():
+    """Assincrono: responde na hora e processa em segundo plano. Resultado em GET /mao/result?tel=..."""
+    import threading
+    auth()
+    raw = request.get_data(as_text=True)
+    log.info('RAW %s', raw[:600])
+    d = request.get_json(silent=True) or {}
+    foto = achar_foto(d, raw)
+    tel = ''.join(c for c in str(d.get('telefone') or '') if c.isdigit())
+    if not foto.startswith('http') or not tel: return jsonify(erro='foto_invalida'), 400
+    base = base_url()
+    JOBS[tel] = {'estado': 'processando', 't': time.time()}
+
+    def run():
+        try:
+            out, st = processar(d, foto, base)
+            JOBS[tel] = {'estado': 'ok' if st == 200 else 'erro', 'out': out, 't': time.time()}
+        except Exception as e:
+            log.exception('job')
+            JOBS[tel] = {'estado': 'erro', 'out': {'erro': str(e)[:100]}, 't': time.time()}
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify(ok=True)
+
+
+@app.get('/mao/result')
+def result():
+    auth()
+    tel = ''.join(c for c in request.args.get('tel', '') if c.isdigit())
+    j = JOBS.get(tel)
+    if not j or j['estado'] != 'ok': return jsonify(estado=(j or {}).get('estado', 'nada')), 404
+    return jsonify(j['out'])
 
 
 @app.get('/img/<n>')
