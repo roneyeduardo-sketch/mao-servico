@@ -4,6 +4,15 @@ from flask import Flask, request, jsonify, send_file, abort
 import mao
 
 app = Flask(__name__)
+import logging, sys
+logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+log = logging.getLogger('mao')
+
+@app.after_request
+def _log(r):
+    log.info('REQ %s %s -> %s', request.method, request.path, r.status_code)
+    return r
+
 OUT = os.environ.get('OUT_DIR', '/tmp/mao_out'); os.makedirs(OUT, exist_ok=True)
 MODEL = os.environ.get('MODEL', 'gpt-5.4-mini')
 LINHA = {'heart': 'linha do coração (amor, afeto, vínculos)', 'head': 'linha da cabeça (mente, decisões)', 'life': 'linha da vida (vitalidade, energia, mudanças)'}
@@ -47,20 +56,25 @@ def tracar():
     if not tok or not hmac.compare_digest(got, tok): abort(401)
     d = request.get_json(silent=True) or {}
     foto = (d.get('foto') or '').strip()
+    log.info('FOTO %s', foto[:200])
     if not foto.startswith('http'): return jsonify(erro='foto_invalida'), 400
     faxina()
     try:
         p = baixar(foto)
     except Exception as e:
+        log.info('ERRO download %s', e)
         return jsonify(erro='download', detalhe=str(e)[:120]), 422
     try:
         pil, P, ln = mao.analyze(p)
+        log.info('LINHAS %s', sorted(ln.keys()))
         if len(ln) < 2: return jsonify(erro='poucas_linhas'), 422
         nome = uuid.uuid4().hex + '.jpg'
         mao.render(pil, P, ln, f'{OUT}/{nome}')
     except ValueError as e:
+        log.info('ERRO valor %s', e)
         return jsonify(erro=str(e)), 422
     except Exception as e:
+        log.exception('ERRO processamento')
         return jsonify(erro='processamento', detalhe=str(e)[:120]), 500
     finally:
         try: os.remove(p)
