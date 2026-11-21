@@ -49,6 +49,22 @@ def leitura(nome, achadas, lang):
     return json.loads(j['choices'][0]['message']['content'])
 
 
+def parse_body(raw):
+    """Aceita JSON valido ou o formato da Leona sem aspas: {k:v,k2:v2}."""
+    import re
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict): return d
+    except Exception:
+        pass
+    ms = list(re.finditer(r'[{,]\s*(\w+):', raw))
+    d = {}
+    for i, m in enumerate(ms):
+        fim = ms[i + 1].start() if i + 1 < len(ms) else len(raw)
+        d[m.group(1)] = raw[m.end():fim].strip().rstrip('}').strip()
+    return d
+
+
 def auth():
     tok = os.environ.get('MAO_TOKEN', '')
     got = (request.headers.get('Authorization') or '').removeprefix('Bearer ').strip()
@@ -105,7 +121,7 @@ def tracar():
     auth()
     raw = request.get_data(as_text=True)
     log.info('RAW %s', raw[:600])
-    d = request.get_json(silent=True) or {}
+    d = parse_body(raw)
     foto = achar_foto(d, raw)
     log.info('FOTO %s', foto[:200])
     if not foto.startswith('http'): return jsonify(erro='foto_invalida'), 400
@@ -123,7 +139,7 @@ def start():
     auth()
     raw = request.get_data(as_text=True)
     log.info('RAW %s', raw[:600])
-    d = request.get_json(silent=True) or {}
+    d = parse_body(raw)
     foto = achar_foto(d, raw)
     tel = ''.join(c for c in str(d.get('telefone') or '') if c.isdigit())
     if not foto.startswith('http') or not tel: return jsonify(erro='foto_invalida'), 400
