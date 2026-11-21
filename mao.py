@@ -181,7 +181,12 @@ def analyze(path):
     warp = cv2.warpPerspective(small, h, (S, S), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     hsv = cv2.cvtColor(warp, cv2.COLOR_RGB2HSV)
     skin = (hsv[..., 0] <= 50) & (hsv[..., 1] >= 20) & (hsv[..., 2] >= 80) & (warp[..., 1] > 10)
-    img = warp.copy(); img[~skin] = 255
+    # a palma (poligono do gabarito) sempre fica; fora dela vale a regra de cor da pele.
+    # isso evita apagar as linhas em maos claras/rosadas ou com brilho (saturacao baixa)
+    palm = np.zeros((S, S), np.uint8)
+    cv2.fillPoly(palm, [np.array([[80,176],[96,146],[108,126],[130,120],[148,125],[166,136],[186,150],[186,200],[168,236],[134,246],[106,232],[88,204]], np.int32)], 1)
+    keep = skin | (palm > 0)
+    img = warp.copy(); img[~keep] = 255
     x = (img.astype(np.float32)/255).transpose(2, 0, 1)[None]
     y = sess().run(['output'], {'input': x})[0]
     ln = ai_lines(y)
