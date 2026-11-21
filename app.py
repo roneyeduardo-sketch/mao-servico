@@ -54,8 +54,17 @@ def tracar():
     tok = os.environ.get('MAO_TOKEN', '')
     got = (request.headers.get('Authorization') or '').removeprefix('Bearer ').strip()
     if not tok or not hmac.compare_digest(got, tok): abort(401)
+    import re
+    raw = request.get_data(as_text=True)
+    log.info('RAW %s', raw[:600])
     d = request.get_json(silent=True) or {}
-    foto = (d.get('foto') or '').strip()
+    foto = ''
+    for k in ('foto', 'foto2', 'foto3'):
+        v = str(d.get(k) or '').strip()
+        if v.startswith('http'): foto = v; break
+    if not foto:
+        m = re.search(r'https?://[^\s"\',}]+', raw)
+        if m: foto = m.group(0)
     log.info('FOTO %s', foto[:200])
     if not foto.startswith('http'): return jsonify(erro='foto_invalida'), 400
     faxina()
