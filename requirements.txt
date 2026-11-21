@@ -1,0 +1,7 @@
+flask
+gunicorn
+mediapipe
+onnxruntime
+opencv-python-headless
+numpy
+pillow
