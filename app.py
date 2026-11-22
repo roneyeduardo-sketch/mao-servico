@@ -31,20 +31,33 @@ def baixar(url):
     open(p, 'wb').write(b); return p
 
 
-def leitura(nome, achadas, lang):
+def leitura(nome, achadas, lang, interesse=''):
     key = os.environ.get('OPENAI_API_KEY')
-    nomes = ', '.join(LINHA[k] for k in achadas) or 'a palma de forma geral'
-    system = ('Você é uma leitora de palma e tarô acolhedora, em português do Brasil, que fala por WhatsApp. '
-              'Foco em amor e relacionamentos. Tom caloroso, sem prometer certezas nem dar conselho médico, financeiro ou jurídico. '
-              'Responda SOMENTE JSON: {"leitura": texto de 900 a 1300 caracteres, parágrafos curtos separados por linha em branco, '
-              'usando *negrito* do WhatsApp nos títulos de cada linha, "resumo": uma frase de até 160 caracteres}. '
-              'Não use travessão nem hífen como pontuação.')
-    user = f'Nome da cliente: {nome or "querida"}. Linhas traçadas na foto dela: {nomes}. Escreva a leitura falando de cada linha traçada e feche com um convite para uma leitura de tarô completa.'
+    tem = ', '.join(LINHA[k] for k in achadas) or 'nenhuma'
+    falta = ', '.join(LINHA[k] for k in LINHA if k not in achadas) or 'nenhuma'
+    system = (
+        'Você é uma leitora de palma e tarô acolhedora, em português do Brasil, falando por WhatsApp com uma cliente. '
+        'Tom caloroso, íntimo e específico, como quem conversa. Não prometa certezas nem dê conselho médico, financeiro ou jurídico. '
+        'Você não vê a imagem: nunca descreva detalhes visuais (cruzamentos, ilhas, ramificações). Interprete pelo simbolismo de cada linha. '
+        'Responda SOMENTE JSON com as chaves: intro, coracao, cabeca, vida, sintese, convite, resumo. '
+        'Cada texto é uma mensagem separada de WhatsApp e traz ideias NOVAS: nunca repita uma ideia, expressão ou conselho já dito em outra parte. '
+        'intro: 250 a 350 caracteres, acolhe pelo nome e, se houver interesse, mostra que a leitura vai olhar para ele. '
+        'coracao: começa com "🔴 *Linha do coração*" e uma quebra de linha, depois 600 a 800 caracteres sobre o jeito de amar, de se entregar, de lidar com perdas e o que a pessoa precisa receber no amor. '
+        'cabeca: começa com "🟡 *Linha da cabeça*" e uma quebra de linha, depois 600 a 800 caracteres sobre como pensa, decide e interpreta o que sente, e como isso aparece nos relacionamentos. '
+        'vida: começa com "🟢 *Linha da vida*" e uma quebra de linha, depois 600 a 800 caracteres sobre energia, fases, recomeços e o que sustenta a pessoa nos momentos de mudança. '
+        'sintese: começa com "✨ *O que as três linhas dizem juntas*" e uma quebra de linha, depois 500 a 700 caracteres que ligam as três linhas, apontam a tensão ou o ponto forte entre elas e dão um conselho prático e gentil para os próximos dias. '
+        'convite: 200 a 300 caracteres, convida para uma leitura de tarô completa, ligada ao interesse da cliente, sem pressão. '
+        'resumo: uma frase de até 160 caracteres. '
+        'Use *negrito* do WhatsApp só nos títulos. Parágrafos curtos. Não use travessão nem hífen como pontuação.')
+    user = (f'Nome da cliente: {nome or "querida"}. '
+            f'Interesse ou contexto que ela contou: {interesse or "não informado, foque em amor e relacionamentos"}. '
+            f'Linhas traçadas na foto: {tem}. Linhas menos nítidas: {falta}. '
+            'Escreva as três partes das linhas mesmo assim, sem mencionar falhas da foto.')
     body = json.dumps({'model': MODEL, 'response_format': {'type': 'json_object'},
                        'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}).encode()
     req = urllib.request.Request('https://api.openai.com/v1/chat/completions', body,
                                  {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=100) as r:
         j = json.load(r)
     return json.loads(j['choices'][0]['message']['content'])
 
@@ -105,10 +118,12 @@ def processar(d, foto, base):
         except OSError: pass
     out = {'imagem': f'{base}/img/{nome}', 'linhas': sorted(ln.keys())}
     try:
-        r = leitura(d.get('nome'), sorted(ln.keys()), d.get('lang', 'pt-BR'))
-        out['leitura'] = r.get('leitura', ''); out['resumo'] = r.get('resumo', '')
+        r = leitura(d.get('nome'), sorted(ln.keys()), d.get('lang', 'pt-BR'), str(d.get('interesse') or '')[:200])
+        partes = ('intro', 'coracao', 'cabeca', 'vida', 'sintese', 'convite')
+        for k in partes: out[k] = str(r.get(k) or '').strip()
+        out['leitura'] = '\n\n'.join(out[k] for k in partes if out[k]); out['resumo'] = str(r.get('resumo') or '')
     except Exception as e:
-        out['leitura'] = ''; out['resumo'] = ''; out['erro_leitura'] = str(e)[:100]
+        [out.setdefault(k, '') for k in ('intro', 'coracao', 'cabeca', 'vida', 'sintese', 'convite')]; out['leitura'] = ''; out['resumo'] = ''; out['erro_leitura'] = str(e)[:100]
     return out, 200
 
 
