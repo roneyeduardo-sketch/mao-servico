@@ -30,7 +30,7 @@ def hl():
     return _hl
 
 
-def ai_lines(L):
+def ai_lines(L, force=True):
     p = 1 / (1 + np.exp(-L.astype(np.float64).reshape(S, S)))
     PG = np.array([[80,176],[96,146],[108,126],[130,120],[148,125],[166,136],[186,150],[186,200],[168,236],[134,246],[106,232],[88,204]], np.int32)
     m = np.zeros((S, S), np.uint8); cv2.fillPoly(m, [PG], 1)
@@ -87,7 +87,7 @@ def ai_lines(L):
         ln = sum(math.hypot(seg[i][0]-seg[i-1][0], seg[i][1]-seg[i-1][1]) for i in range(1, len(seg)))
         return {'pts': seg, 'len': ln, 'mean': float(np.mean(sv))}
 
-    res = {}
+    res = {}; raw = {}
     CX, CY, A0, A1 = 90, 195, -104, 56
     def pol(t, r):
         a = t*math.pi/180; return (CX + r*math.cos(a), CY + r*math.sin(a))
@@ -100,6 +100,7 @@ def ai_lines(L):
             lastq = q
         k0 = 0
         while k0 < len(pts) and pts[k0][0] < 97: k0 += 1
+        raw['life'] = pts[k0:]
         res['life'] = trim(pts[k0:])
     else:
         res['life'] = None
@@ -114,6 +115,7 @@ def ai_lines(L):
     p0 = p.copy(); supp(res['life'], 2)
     hpr = lambda x: lerp(146, 160, (x-126)/50)
     hy = dp(124, 188, lambda x: hpr(x)-18, lambda x: hpr(x)+16, hpr, lambda x, y: pk(x, y), 16, .12, 2)
+    if hy: raw['heart'] = [(124+k, y) for k, y in enumerate(hy) if 128 <= 124+k <= 186]
     res['heart'] = trim([(124+k, y) for k, y in enumerate(hy)], .4, 4) if hy else None
     hmap = {}
     if res['heart']:
@@ -121,6 +123,7 @@ def ai_lines(L):
     dpr = lambda x: lerp(146, 178, (x-98)/52)
     def head_run():
         dy = dp(90, 186, lambda x: max(dpr(x)-16, hmap[x]+4 if x in hmap else 0), lambda x: dpr(x)+22, dpr, lambda x, y: pk(x, y), 14, .12, 2)
+        if dy: raw['head'] = [(90+k, y) for k, y in enumerate(dy) if 100 <= 90+k <= 160]
         return trim([(90+k, y) for k, y in enumerate(dy)]) if dy else None
     hd = head_run()
     if not (hd and hd['len'] >= 28 and hd['mean'] >= .5):
@@ -138,6 +141,21 @@ def ai_lines(L):
     for k in ('heart', 'head', 'life'):
         r = res[k]
         if r and (r['len'] < 16 or r['mean'] < .42): res[k] = None
+    if force:
+        prior = {'heart': [(x, hpr(x)) for x in range(128, 181, 2)],
+                 'head': [(x, dpr(x)) for x in range(102, 151, 2)],
+                 'life': [pol(t, 39) for t in range(-75, 52, 4)]}
+        def sobrepoe(pts, outros):
+            # fracao de pontos a menos de 7 px de outra linha ja achada
+            if not outros: return 0.0
+            n = sum(1 for q in pts if min(math.hypot(q[0]-o[0], q[1]-o[1]) for o in outros) < 7)
+            return n / len(pts)
+        for k in ('heart', 'head', 'life'):
+            if res[k]: continue
+            outros = [q for j in ('heart', 'head', 'life') if res[j] for q in res[j]['pts']]
+            pts = raw.get(k) or []
+            if len(pts) < 12 or sobrepoe(pts, outros) > .25: pts = prior[k]
+            res[k] = {'pts': pts, 'len': 0, 'mean': 0, 'forcada': True}
     for k in ('heart', 'head', 'life'):
         r = res[k]
         if not r: continue
@@ -190,15 +208,21 @@ def analyze(path):
     x = (img.astype(np.float32)/255).transpose(2, 0, 1)[None]
     y = sess().run(['output'], {'input': x})[0]
     ln = ai_lines(y)
-    out = {}
+    out = Linhas()
     for k in ('heart', 'head', 'life'):
         r = ln.get(k)
         if not r: continue
+        if r.get('forcada'): out.forcadas.add(k)
         a = np.array(r['pts'], np.float64)
         q = cv2.perspectiveTransform(a[None], hi)[0]
         out[k] = [((W - qx/sc) if flip_ else qx/sc, qy/sc) for qx, qy in q]
     P = np.array([[q.x*W, q.y*H] for q in lm])
     return pil, P, out
+
+
+class Linhas(dict):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k); self.forcadas = set()
 
 
 COL = {'heart': (255, 107, 107), 'head': (242, 207, 107), 'life': (63, 208, 140)}
@@ -234,7 +258,8 @@ def render(pil, P, lines, out_path, ow=900):
     def tr(p):
         q = A@np.array(p) + b; return (float(q[0]), float(q[1]))
     sw = max(5, int(Lp*k*.022))
-    for n in ('life', 'head', 'heart'):
+    fc = getattr(lines, 'forcadas', set())
+    for n in sorted(('life', 'head', 'heart'), key=lambda x: x not in fc):
         if n in lines and len(lines[n]) > 3:
             pts = [tr(q) for q in lines[n]]
             d.line(pts, fill=COL[n]+(70,), width=sw*3, joint='curve')   # brilho
