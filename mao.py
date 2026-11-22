@@ -162,11 +162,12 @@ def ai_lines(L, force=True):
     MINL = {'heart': 45, 'head': 45, 'life': 55}
     def plen(a):
         return sum(math.hypot(a[i][0]-a[i-1][0], a[i][1]-a[i-1][1]) for i in range(1, len(a)))
+    RL = {'D': DMIN, 'M': MARG}
     def melhor(pts, outros):
         best = []; cur = []
         for q in pts:
-            ok = cv2.pointPolygonTest(PGf, (float(q[0]), float(q[1])), True) >= MARG and \
-                 (not outros or min(math.hypot(q[0]-o[0], q[1]-o[1]) for o in outros) >= DMIN)
+            ok = cv2.pointPolygonTest(PGf, (float(q[0]), float(q[1])), True) >= RL['M'] and \
+                 (not outros or min(math.hypot(q[0]-o[0], q[1]-o[1]) for o in outros) >= RL['D'])
             if ok: cur.append(q)
             else:
                 if plen(cur) > plen(best): best = cur
@@ -177,8 +178,13 @@ def ai_lines(L, force=True):
         feitas = {}
         for k in ordem:
             r = res[k]; outros = [q for v in feitas.values() for q in v]
+            RL['D'], RL['M'] = DMIN, MARG
             seg = melhor(r['pts'], outros)
-            if plen(seg) < MINL[k]:
+            for d_, m_ in ((DMIN, MARG), (5, 4), (4, 3), (3, 2)):
+                RL['D'], RL['M'] = d_, m_
+                s2 = melhor(r['pts'], outros)
+                if plen(s2) > plen(seg): seg = s2
+                if plen(seg) >= MINL[k]*.95: break
                 cand = None; bl = plen(seg)
                 for sh in (0, 5, -5, 10, -10, 15, -15, 20, -20):
                     pp = [(x, y+sh) if k != 'life' else (x+sh, y) for x, y in prior[k]]
@@ -187,6 +193,7 @@ def ai_lines(L, force=True):
                     if plen(sg) > bl: bl = plen(sg); cand = sg
                 if cand and plen(cand) > plen(seg):
                     seg = cand; r['forcada'] = True
+                if plen(seg) >= MINL[k]*.95: break
             if len(seg) >= 2: r['pts'] = seg
             feitas[k] = r['pts']
     for k in ('heart', 'head', 'life'):
@@ -197,6 +204,304 @@ def ai_lines(L, force=True):
                sum(a[j][1] for j in range(max(0, i-4), min(n-1, i+4)+1))/(min(n-1, i+4)-max(0, i-4)+1)) for i in range(n)]
         r['pts'] = [q for i, q in enumerate(sm) if i % 3 == 0 or i == n-1]
     return res
+
+
+# ============ METODO POR TRACOS: esqueleto do mapa da rede -> grafo -> linhas inteiras com forma anatomica ============
+tr_S = 256
+tr_PG = [[80,176],[96,146],[108,126],[130,120],[148,125],[166,136],[186,150],[186,200],[168,236],[134,246],[106,232],[88,204]]
+
+def tr_lerp(a, b, t): return a + (b-a)*t
+def tr_hpr(x): return tr_lerp(146, 160, (x-126)/50)
+def tr_dpr(x): return tr_lerp(146, 178, (x-98)/52)
+tr_CX, tr_CY = 90, 195
+def tr_pol(t, r=39):
+    a = t*math.pi/180; return (tr_CX + r*math.cos(a), tr_CY + r*math.sin(a))
+
+def tr_zhang_suen(B):
+    I = B.astype(np.uint8).copy()
+    changed = True
+    while changed:
+        changed = False
+        for step in (0, 1):
+            P = np.pad(I, 1)
+            p2 = P[:-2, 1:-1]; p3 = P[:-2, 2:]; p4 = P[1:-1, 2:]; p5 = P[2:, 2:]
+            p6 = P[2:, 1:-1]; p7 = P[2:, :-2]; p8 = P[1:-1, :-2]; p9 = P[:-2, :-2]
+            nb = [p2, p3, p4, p5, p6, p7, p8, p9]
+            Bn = sum(n.astype(int) for n in nb)
+            seq = nb + [p2]
+            A = sum(((seq[i] == 0) & (seq[i+1] == 1)).astype(int) for i in range(8))
+            if step == 0:
+                c = (p2*p4*p6 == 0) & (p4*p6*p8 == 0)
+            else:
+                c = (p2*p4*p8 == 0) & (p2*p6*p8 == 0)
+            m = (I == 1) & (Bn >= 2) & (Bn <= 6) & (A == 1) & c
+            if m.any():
+                I[m] = 0; changed = True
+    return I
+
+tr_N8 = [(-1,-1),(0,-1),(1,-1),(-1,0),(1,0),(-1,1),(0,1),(1,1)]
+
+def tr_components(B, minsize):
+    H, W = B.shape; lab = np.zeros(B.shape, np.int32); n = 0; out = B.copy()
+    for y in range(H):
+        for x in range(W):
+            if B[y, x] and not lab[y, x]:
+                n += 1; st = [(x, y)]; lab[y, x] = n; pix = []
+                while st:
+                    cx, cy = st.pop(); pix.append((cx, cy))
+                    for dx, dy in tr_N8:
+                        nx, ny = cx+dx, cy+dy
+                        if 0 <= nx < W and 0 <= ny < H and B[ny, nx] and not lab[ny, nx]:
+                            lab[ny, nx] = n; st.append((nx, ny))
+                if len(pix) < minsize:
+                    for cx, cy in pix: out[cy, cx] = 0
+    return out
+
+tr_RING = [(0,-1),(1,-1),(1,0),(1,1),(0,1),(-1,1),(-1,0),(-1,-1)]
+
+def tr_graph(Sk):
+    pts = set((int(x), int(y)) for y, x in zip(*np.nonzero(Sk)))
+    def nbrs(p): return [(p[0]+dx, p[1]+dy) for dx, dy in tr_N8 if (p[0]+dx, p[1]+dy) in pts]
+    def cn(p):
+        r = [((p[0]+dx, p[1]+dy) in pts) for dx, dy in tr_RING]
+        return sum(1 for i in range(8) if r[i] and not r[(i+1) % 8])
+    # poda de espinhos curtos (ate 5 px)
+    for _ in range(3):
+        ends = sorted([p for p in pts if cn(p) == 1], key=lambda q: (q[1], q[0])); rem = False
+        for e in ends:
+            chain = [e]; vis = {e}; cur = e
+            while True:
+                nn = [q for q in nbrs(cur) if q not in vis]
+                if not nn: break
+                nn.sort(key=lambda r: abs(r[0]-cur[0]) + abs(r[1]-cur[1]))
+                nx = nn[0]
+                if cn(nx) >= 3:
+                    if len(chain) <= 5:
+                        for c in chain: pts.discard(c)
+                        rem = True
+                    break
+                chain.append(nx); vis.add(nx); cur = nx
+                if len(chain) > 5: break
+        if not rem: break
+    C = {p: cn(p) for p in pts}
+    nodes = {p for p in pts if C[p] != 2}
+    nodes_s = sorted(nodes, key=lambda q: (q[1], q[0]))
+    cid = {}; k = 0
+    for p in nodes_s:
+        if p in cid: continue
+        k += 1; st = [p]; cid[p] = k
+        while st:
+            c = st.pop()
+            for q in nbrs(c):
+                if q in nodes and q not in cid: cid[q] = k; st.append(q)
+    edges = []; vis = set()
+    for p in nodes_s:
+        for q in nbrs(p):
+            if q in nodes or q in vis: continue
+            chain = [p, q]; vis.add(q); cur = q
+            while True:
+                nn = [r for r in nbrs(cur) if r not in vis and r != chain[-2]]
+                nd = [r for r in nn if r in nodes and cid[r] != cid[p] or (r in nodes and len(chain) > 3)]
+                free = [r for r in nn if r not in nodes]
+                if free:
+                    free.sort(key=lambda r: abs(r[0]-cur[0]) + abs(r[1]-cur[1]))
+                    cur = free[0]; vis.add(cur); chain.append(cur); continue
+                if nd:
+                    chain.append(nd[0]); edges.append((cid[p], cid[nd[0]], chain))
+                break
+    return edges
+
+def tr_plen(a):
+    return sum(math.hypot(a[i][0]-a[i-1][0], a[i][1]-a[i-1][1]) for i in range(1, len(a)))
+
+def tr_dir_at(a, start, n=6):
+    if start:
+        j = min(n, len(a)-1); return math.atan2(a[j][1]-a[0][1], a[j][0]-a[0][0])
+    j = max(0, len(a)-1-n); return math.atan2(a[-1][1]-a[j][1], a[-1][0]-a[j][0])
+
+def tr_paths(edges, maxturn=50, maxe=6):
+    adj = {}
+    for i, (a, b, ch) in enumerate(edges):
+        adj.setdefault(a, []).append((i, b, ch)); adj.setdefault(b, []).append((i, a, ch[::-1]))
+    out = []
+    def dfs(node, pts, used, ne):
+        if len(out) > 4000: return
+        if tr_plen(pts) >= 15: out.append(list(pts))
+        if ne >= maxe: return
+        for i, nb, ch in adj.get(node, []):
+            if i in used: continue
+            if pts:
+                d1 = tr_dir_at(pts, False); d2 = tr_dir_at(ch, True)
+                da = abs(math.atan2(math.sin(d2-d1), math.cos(d2-d1)))
+                if da > math.radians(maxturn): continue
+            dfs(nb, pts + ch[1:] if pts else list(ch), used | {i}, ne+1)
+    for n in adj:
+        dfs(n, [], frozenset(), 0)
+    # quebra caminhos em dobras bruscas (> 55 graus) e usa os pedacos como candidatos
+    extra = []
+    for p in out:
+        cuts = [0]; w = 5
+        for i in range(w, len(p)-w):
+            a1 = math.atan2(p[i][1]-p[i-w][1], p[i][0]-p[i-w][0]); a2 = math.atan2(p[i+w][1]-p[i][1], p[i+w][0]-p[i][0])
+            if abs(math.atan2(math.sin(a2-a1), math.cos(a2-a1))) > math.radians(55) and i - cuts[-1] > 3: cuts.append(i)
+        if len(cuts) > 1:
+            cuts.append(len(p)-1)
+            for a, b in zip(cuts[:-1], cuts[1:]):
+                q = p[a+2:b-1] if a else p[:b-1]
+                if tr_plen(q) >= 15: extra.append(q)
+    out += extra
+    # remove duplicados (mesmo caminho invertido)
+    uniq = {}
+    for p in out:
+        key = (tuple(p[0]), tuple(p[-1]), len(p))
+        rk = (tuple(p[-1]), tuple(p[0]), len(p))
+        if key in uniq or rk in uniq: continue
+        uniq[key] = p
+    return list(uniq.values())
+
+def tr_smooth(a, it=3):
+    a = [tuple(map(float, q)) for q in a]
+    for _ in range(it):
+        if len(a) < 3: break
+        a = [a[0]] + [((a[i-1][0]+2*a[i][0]+a[i+1][0])/4, (a[i-1][1]+2*a[i][1]+a[i+1][1])/4) for i in range(1, len(a)-1)] + [a[-1]]
+    return a
+
+def tr_mind(q, curve):
+    return min(math.hypot(q[0]-c[0], q[1]-c[1]) for c in curve)
+
+tr_PRI = {'heart': [(x, tr_hpr(x)) for x in range(108, 192, 2)],
+       'head': [(x, tr_dpr(x)) for x in range(94, 176, 2)],
+       'life': [tr_pol(t) for t in range(-100, 62, 3)]}
+
+def tr_feats(p, P):
+    xs = [q[0] for q in p]; ys = [q[1] for q in p]
+    mp = float(np.mean([P[int(q[1]), int(q[0])] for q in p]))
+    return dict(L=tr_plen(p), mp=mp, x0=min(xs), x1=max(xs), y0=min(ys), y1=max(ys),
+                ch=math.atan2(p[-1][1]-p[0][1], p[-1][0]-p[0][0]))
+
+def tr_orient(p, kind):
+    # heart/head: da esquerda (polegar) para a direita; life: de cima para baixo
+    if kind == 'life':
+        return p if p[0][1] <= p[-1][1] else p[::-1]
+    return p if p[0][0] <= p[-1][0] else p[::-1]
+
+def tr_max_turn(p, w=5):
+    m = 0.0
+    for i in range(w, len(p)-w):
+        a1 = math.atan2(p[i][1]-p[i-w][1], p[i][0]-p[i-w][0]); a2 = math.atan2(p[i+w][1]-p[i][1], p[i+w][0]-p[i][0])
+        m = max(m, abs(math.atan2(math.sin(a2-a1), math.cos(a2-a1))))
+    return math.degrees(m)
+
+def tr_trim_steep(p, lim=50, w=6):
+    # tira pontas muito inclinadas (vinco de dedo) do coracao/cabeca
+    def ang(i, j): return abs(math.degrees(math.atan2(p[j][1]-p[i][1], p[j][0]-p[i][0])))
+    a = 0
+    while a+w < len(p) and min(ang(a, a+w), 180-ang(a, a+w)) > lim: a += 1
+    b = len(p)-1
+    while b-w > a and min(ang(b-w, b), 180-ang(b-w, b)) > lim: b -= 1
+    return p[a:b+1]
+
+def tr_score(p, kind, P):
+    p = tr_orient(p, kind)
+    if kind in ('heart', 'head'): p = tr_trim_steep(p, 50 if kind == 'heart' else 60)
+    if len(p) < 10 or tr_max_turn(p) > 55: return None
+    f = tr_feats(p, P)
+    dpri = float(np.mean([tr_mind(q, tr_PRI[kind]) for q in p[::2]]))
+    ang = math.degrees(math.atan2(p[-1][1]-p[0][1], p[-1][0]-p[0][0]))
+    if kind == 'heart':
+        if f['x1'] < 150 or f['x1']-f['x0'] < 28 or not (-40 <= ang <= 40): return None
+    elif kind == 'head':
+        if f['x0'] > 128 or f['x1']-f['x0'] < 22 or not (-15 <= ang <= 52): return None
+        if (f['x1']-f['x0']) < .9*(f['y1']-f['y0']): return None
+        if f['y1'] > 215: return None
+    else:
+        if f['y1']-f['y0'] < 30 or f['y0'] > 175 or f['x0'] > 135: return None
+        if not (35 <= ang <= 140): return None
+    if dpri > 22: return None
+    return f['L']*(.4+f['mp']) - 1.6*dpri*(1 + f['L']/60), p
+
+def tr_overlap(a, b, d=3.0):
+    if not a or not b: return 0.0
+    n = sum(1 for q in a[::2] if tr_mind(q, b) < d)
+    return n / max(1, len(a[::2]))
+
+def tr_strip_near(a, others, d=3.0):
+    best = []; cur = []
+    for q in a:
+        if any(tr_mind(q, o) < d for o in others if o): 
+            if tr_plen(cur) > tr_plen(best): best = cur
+            cur = []
+        else: cur.append(q)
+    return cur if tr_plen(cur) > tr_plen(best) else best
+
+def tr_tail_after(d, l, dd=3.0):
+    # cabeca pode nascer junto da vida: ignora o trecho inicial compartilhado
+    i = 0
+    while i < len(d) and tr_mind(d[i], l) < dd: i += 1
+    return d[i:] if i < len(d) else d[-1:]
+
+def tr_below(head, heart):
+    hx = {}
+    for q in heart: hx.setdefault(int(round(q[0])), []).append(q[1])
+    n = c = 0
+    for q in head:
+        k = int(round(q[0]))
+        if k in hx:
+            n += 1
+            if q[1] > min(hx[k]) - 1: c += 1
+    return n == 0 or c / n > .7
+
+def tr_lines(P, thr=.3, dbg=None):
+    B = (P > thr)
+    B = tr_components(B, 12)
+    Sk = tr_zhang_suen(B)
+    E = tr_graph(Sk)
+    C = tr_paths(E)
+    cands = {k: [] for k in ('heart', 'head', 'life')}
+    for p in C:
+        for k in cands:
+            r = tr_score(p, k, P)
+            if r: cands[k].append(r)
+    for k in cands: cands[k].sort(key=lambda t: -t[0]); cands[k] = cands[k][:10]
+    if dbg is not None: dbg.update(dict(B=B, Sk=Sk, E=E, C=C, cands=cands))
+    best = None
+    L_ = cands['life'] + [(0, None)]; H_ = cands['heart'] + [(0, None)]; D_ = cands['head'] + [(0, None)]
+    for sl, l in L_:
+        for sh, h in H_:
+            if l and h and tr_overlap(h, l) > .2: continue
+            for sd, d in D_:
+                if d is not None:
+                    if l and tr_overlap(tr_tail_after(d, l), l) > .2: continue
+                    if h and tr_overlap(d, h) > .25: continue
+                    if h and not tr_below(d, h): continue
+                tot = sl + sh + sd
+                if best is None or tot > best[0]: best = (tot, l, h, d)
+    _, l, h, d = best
+    out = {}
+    if l: out['life'] = tr_smooth(l)
+    if h: out['heart'] = tr_smooth(tr_strip_near(h, [l], 2.5) if l else h)
+    if d:
+        dd = tr_strip_near(d, [l, h], 2.5)
+        if tr_plen(dd) >= 20: out['head'] = tr_smooth(dd)
+    return out
+
+
+_TRM = None
+def tr_mask():
+    """mascara da palma (mesmo teste par-impar do site)."""
+    global _TRM
+    if _TRM is None:
+        m = np.zeros((S, S))
+        for v in range(S):
+            for u in range(S):
+                c = False; j = len(tr_PG)-1
+                for i in range(len(tr_PG)):
+                    a = tr_PG[i]; b = tr_PG[j]
+                    if (a[1] > v) != (b[1] > v) and u < (b[0]-a[0])*(v-a[1])/(b[1]-a[1])+a[0]: c = not c
+                    j = i
+                m[v, u] = 1.0 if c else 0.0
+        _TRM = m
+    return _TRM
 
 
 def analyze(path):
@@ -241,6 +546,14 @@ def analyze(path):
     x = (img.astype(np.float32)/255).transpose(2, 0, 1)[None]
     y = sess().run(['output'], {'input': x})[0]
     ln = ai_lines(y)
+    # metodo por tracos: cada linha encontrada inteira no mapa da rede substitui a do metodo antigo
+    try:
+        pm = 1 / (1 + np.exp(-y.astype(np.float64).reshape(S, S)))
+        tv = tr_lines(pm * tr_mask())
+        for k_ in ('heart', 'head', 'life'):
+            if k_ in tv: ln[k_] = {'pts': tv[k_], 'len': 0, 'mean': 1}
+    except Exception:
+        pass
     out = Linhas()
     for k in ('heart', 'head', 'life'):
         r = ln.get(k)
@@ -254,13 +567,18 @@ def analyze(path):
     hull = cv2.convexHull(P[[0, 1, 2, 5, 9, 13, 17]].astype(np.float32))[:, 0, :]
     cen = hull.mean(0); hull = (cen + (hull - cen)*1.05).astype(np.float32).reshape(-1, 1, 2)
     for k in list(out.keys()):
-        seg = []; best = []
-        for q in out[k] + [None]:
-            if q is not None and cv2.pointPolygonTest(hull, (float(q[0]), float(q[1])), False) >= 0: seg.append(q)
-            else:
-                if len(seg) > len(best): best = seg
-                seg = []
-        if len(best) >= 4: out[k] = best
+        n0 = len(out[k]); pick = None
+        for fx in (1, 1.08, 1.16, 1.25):
+            if pick is not None and len(pick) >= n0*.8: break
+            H2 = (cen + (hull.reshape(-1,2) - cen)*fx).astype(np.float32).reshape(-1, 1, 2)
+            seg = []; best = []
+            for q in out[k] + [None]:
+                if q is not None and cv2.pointPolygonTest(H2, (float(q[0]), float(q[1])), False) >= 0: seg.append(q)
+                else:
+                    if len(seg) > len(best): best = seg
+                    seg = []
+            if pick is None or len(best) > len(pick): pick = best
+        if len(pick) >= 4: out[k] = pick
     return pil, P, out
 
 
