@@ -156,6 +156,39 @@ def ai_lines(L, force=True):
             pts = raw.get(k) or []
             if len(pts) < 12 or sobrepoe(pts, outros) > .25: pts = prior[k]
             res[k] = {'pts': pts, 'len': 0, 'mean': 0, 'forcada': True}
+    # pos-processamento: dentro da palma, comprimento minimo e sem sobreposicao
+    PGf = PG.astype(np.float32).reshape(-1, 1, 2)
+    MARG, DMIN = 5, 7
+    MINL = {'heart': 45, 'head': 45, 'life': 55}
+    def plen(a):
+        return sum(math.hypot(a[i][0]-a[i-1][0], a[i][1]-a[i-1][1]) for i in range(1, len(a)))
+    def melhor(pts, outros):
+        best = []; cur = []
+        for q in pts:
+            ok = cv2.pointPolygonTest(PGf, (float(q[0]), float(q[1])), True) >= MARG and \
+                 (not outros or min(math.hypot(q[0]-o[0], q[1]-o[1]) for o in outros) >= DMIN)
+            if ok: cur.append(q)
+            else:
+                if plen(cur) > plen(best): best = cur
+                cur = []
+        return cur if plen(cur) > plen(best) else best
+    if force:
+        ordem = sorted(('life', 'heart', 'head'), key=lambda k: bool(res[k].get('forcada')))
+        feitas = {}
+        for k in ordem:
+            r = res[k]; outros = [q for v in feitas.values() for q in v]
+            seg = melhor(r['pts'], outros)
+            if plen(seg) < MINL[k]:
+                cand = None; bl = plen(seg)
+                for sh in (0, 5, -5, 10, -10, 15, -15, 20, -20):
+                    pp = [(x, y+sh) if k != 'life' else (x+sh, y) for x, y in prior[k]]
+                    sg = melhor(pp, outros)
+                    if plen(sg) >= MINL[k]*.95: cand = sg; break
+                    if plen(sg) > bl: bl = plen(sg); cand = sg
+                if cand and plen(cand) > plen(seg):
+                    seg = cand; r['forcada'] = True
+            if len(seg) >= 2: r['pts'] = seg
+            feitas[k] = r['pts']
     for k in ('heart', 'head', 'life'):
         r = res[k]
         if not r: continue
@@ -217,6 +250,17 @@ def analyze(path):
         q = cv2.perspectiveTransform(a[None], hi)[0]
         out[k] = [((W - qx/sc) if flip_ else qx/sc, qy/sc) for qx, qy in q]
     P = np.array([[q.x*W, q.y*H] for q in lm])
+    # recorta as linhas ao casco da palma (landmarks da base da mao), para nao sairem da mao
+    hull = cv2.convexHull(P[[0, 1, 2, 5, 9, 13, 17]].astype(np.float32))[:, 0, :]
+    cen = hull.mean(0); hull = (cen + (hull - cen)*1.05).astype(np.float32).reshape(-1, 1, 2)
+    for k in list(out.keys()):
+        seg = []; best = []
+        for q in out[k] + [None]:
+            if q is not None and cv2.pointPolygonTest(hull, (float(q[0]), float(q[1])), False) >= 0: seg.append(q)
+            else:
+                if len(seg) > len(best): best = seg
+                seg = []
+        if len(best) >= 4: out[k] = best
     return pil, P, out
 
 
