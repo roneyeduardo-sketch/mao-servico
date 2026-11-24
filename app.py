@@ -23,6 +23,17 @@ def faxina():
         if time.time() - os.path.getmtime(f) > 86400: os.remove(f)
 
 
+def subir(path, nome):
+    up = os.environ.get('UP_URL', '').rstrip('/'); tok = os.environ.get('MAO_UP_TOKEN', '')
+    if not up or not tok: return ''
+    try:
+        with open(path, 'rb') as fh: data = fh.read()
+        rq = urllib.request.Request(f'{up}/up/{nome}', data, {'Authorization': 'Bearer ' + tok, 'Content-Type': 'image/jpeg', 'User-Agent': 'Mozilla/5.0'}, method='PUT')
+        urllib.request.urlopen(rq, timeout=20).read()
+        return f'{up}/i/{nome}'
+    except Exception as e:
+        log.info('ERRO upload %s', e); return ''
+
 def baixar(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     with urllib.request.urlopen(req, timeout=20) as r:
@@ -116,7 +127,7 @@ def processar(d, foto, base):
     finally:
         try: os.remove(p)
         except OSError: pass
-    out = {'imagem': f'{base}/img/{nome}', 'linhas': sorted(ln.keys())}
+    out = {'imagem': subir(f'{OUT}/{nome}', nome) or f'{base}/img/{nome}', 'linhas': sorted(ln.keys())}
     try:
         r = leitura(d.get('nome'), sorted(ln.keys()), d.get('lang', 'pt-BR'), str(d.get('interesse') or '')[:200])
         partes = ('intro', 'coracao', 'cabeca', 'vida', 'sintese', 'convite')
