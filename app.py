@@ -42,8 +42,40 @@ def baixar(url):
     open(p, 'wb').write(b); return p
 
 
+LINHA_ES = {'heart': 'línea del corazón (amor, afecto, vínculos)', 'head': 'línea de la cabeza (mente, decisiones)', 'life': 'línea de la vida (vitalidad, energía, cambios)'}
+
+
+def prompts_es(nome, achadas, lang, interesse):
+    pais = 'español de España (castellano peninsular, con tuteo y sin modismos latinoamericanos)' if lang.lower().startswith('es-es') else 'español de México (cálido y cercano, sin modismos de España)'
+    tem = ', '.join(LINHA_ES[k] for k in achadas) or 'ninguna'
+    falta = ', '.join(LINHA_ES[k] for k in LINHA_ES if k not in achadas) or 'ninguna'
+    system = (
+        f'Eres una lectora de mano y tarot acogedora que escribe en {pais}, hablando por WhatsApp con una clienta. '
+        'Tono cálido, íntimo y específico, como quien conversa. No prometas certezas ni des consejos médicos, financieros ni legales. '
+        'Tú no ves la imagen: nunca describas detalles visuales (cruces, islas, ramificaciones). Interpreta por el simbolismo de cada línea. '
+        'Responde SOLO JSON con las claves: intro, coracao, cabeca, vida, sintese, convite, resumo. Todo el texto en español. '
+        'Cada texto es un mensaje separado de WhatsApp y trae ideas NUEVAS: nunca repitas una idea, expresión o consejo ya dicho en otra parte. '
+        'intro: 250 a 350 caracteres, saluda por el nombre y, si hay interés, muestra que la lectura va a mirar hacia él. '
+        'coracao: empieza con "🔴 *Línea del corazón*" y un salto de línea, después 600 a 800 caracteres sobre su forma de amar, de entregarse, de vivir las pérdidas y lo que necesita recibir en el amor. '
+        'cabeca: empieza con "🟡 *Línea de la cabeza*" y un salto de línea, después 600 a 800 caracteres sobre cómo piensa, decide e interpreta lo que siente, y cómo eso aparece en sus relaciones. '
+        'vida: empieza con "🟢 *Línea de la vida*" y un salto de línea, después 600 a 800 caracteres sobre energía, etapas, nuevos comienzos y lo que la sostiene en los momentos de cambio. '
+        'sintese: empieza con "✨ *Lo que dicen las tres líneas juntas*" y un salto de línea, después 500 a 700 caracteres que unen las tres líneas, señalan la tensión o el punto fuerte entre ellas y dan un consejo práctico y amable para los próximos días. '
+        'convite: 200 a 300 caracteres, invita a una lectura de tarot completa, ligada al interés de la clienta, sin presión. '
+        'resumo: una frase de hasta 160 caracteres. '
+        'Usa *negrita* de WhatsApp solo en los títulos. Párrafos cortos. No uses guion largo ni guion como puntuación.')
+    user = (f'Nombre de la clienta: {nome or "querida"}. '
+            f'Interés o contexto que ella contó: {interesse or "no informado, enfócate en el amor y las relaciones"}. '
+            f'Líneas trazadas en la foto: {tem}. Líneas menos nítidas: {falta}. '
+            'Escribe las tres partes de las líneas de todas formas, sin mencionar fallas de la foto.')
+    return system, user
+
+
 def leitura(nome, achadas, lang, interesse=''):
     key = os.environ.get('OPENAI_API_KEY')
+    lang = str(lang or 'pt-BR').strip()
+    if lang.lower().startswith('es'):
+        system, user = prompts_es(nome, achadas, lang, interesse)
+        return chamar_ia(key, system, user)
     tem = ', '.join(LINHA[k] for k in achadas) or 'nenhuma'
     falta = ', '.join(LINHA[k] for k in LINHA if k not in achadas) or 'nenhuma'
     system = (
@@ -64,6 +96,10 @@ def leitura(nome, achadas, lang, interesse=''):
             f'Interesse ou contexto que ela contou: {interesse or "não informado, foque em amor e relacionamentos"}. '
             f'Linhas traçadas na foto: {tem}. Linhas menos nítidas: {falta}. '
             'Escreva as três partes das linhas mesmo assim, sem mencionar falhas da foto.')
+    return chamar_ia(key, system, user)
+
+
+def chamar_ia(key, system, user):
     body = json.dumps({'model': MODEL, 'response_format': {'type': 'json_object'},
                        'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}).encode()
     req = urllib.request.Request('https://api.openai.com/v1/chat/completions', body,
